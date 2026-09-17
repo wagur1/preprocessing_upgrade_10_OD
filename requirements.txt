@@ -1,0 +1,10 @@
+torch>=2.0
+torchvision>=0.15
+opencv-python-headless
+numpy
+scipy
+pyyaml
+tqdm
+matplotlib
+pandas
+pytest

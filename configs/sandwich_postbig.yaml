@@ -1,0 +1,111 @@
+# =============================================================================
+# POST CAPACITY 4.7M — the measured, monotone lever, one rung further.
+#
+# The project's own scale law (n=1159, same instrument):
+#     POST   0 (prep-only)  -2.46 / -0.78
+#     POST 577k (base 32)   -4.45 / -2.05
+#     POST 2.29M (base 64)  -5.71 / -4.22      <- E4, the record
+#   -> monotone and NOT saturated, which is why this rung exists.
+#
+# Single-variable change vs the E4 recipe: `model.post_base: 92` (2.29M -> 4.71M,
+# a 2x step) and nothing else — no w_budget, no temporal branch, so the
+# comparison isolates capacity. `post_base: 128` (~9.2M) is the rung after this.
+#
+# Why this is the fallback of choice: it needs no new mechanism and no theory.
+# The spatial head measured NEGATIVE (docs/RUN_DESIGN_spatial.md, verdict in the
+# vcm_deepseek memory) and the temporal POST is still unproven, so if the
+# temporal run comes back flat, this is the one direction with a measured
+# positive slope.
+#
+# Cost: ~2x the E4 compute per epoch, so budget for the 12 h session cap —
+# `resume: true` continues in a second session (wall clock ~1 day, quota billed
+# on real GPU time).
+#
+# Pre-registered reading: BD better than E4 by >= 0.5 pp on at least one codec
+# with the gap rule PASS. Extrapolating the two measured steps (+1.26/+2.17 for
+# the last 4x), a 2x step should be worth roughly +0.5...+1.5 pp; anything less
+# than +0.3 pp is noise at n=1159 and closes the capacity axis.
+# =============================================================================
+
+device: auto
+out_dir: outputs/sandwich_postbig
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18
+
+model:
+  arch: sandwich
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.5
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  gate: false
+  w_budget: 0.0          # legacy free scale (the record's own operating point)
+  post_base: 92          # <- THE single change: 2.29M -> 4.71M
+  post_temporal: false
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/kinetics_hash_split.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001
+  tau: 0.05
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0
+  rho: 1.0
+  use_task_mask: true
+
+train:
+  epochs: 16
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 4
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

@@ -1,0 +1,65 @@
+# =============================================================================
+# v9-b zero-shot on GOT-10k tracking (task-2, second model).
+#
+# The v9-b DualCodecSandwich checkpoint (per-codec PRE + per-codec POST,
+# assembled from the v8 record holders, trained on Kinetics-400 action
+# recognition, never saw tracking data) is evaluated AS-IS on GOT-10k val.
+# Arms: anchor / prep+codec / sandwich+codec per codec (PRE and POST are
+# routed by codec — the engine passes codec= to DualCodecSandwich), x264+x265
+# medium, QP 30-50, quality axis = success-plot AUC. frame_size 128 matches
+# the PREs' training resolution. Mirrors configs/e4_tracking.yaml (v8).
+# =============================================================================
+
+device: auto
+out_dir: outputs/v9b_tracking
+seed: 0
+
+task:
+  name: tracking
+  backbone: resnet18      # frozen SiamFC feature backbone
+  exemplar_size: 127
+  search_size: 255
+  pos_radius: 2.0
+
+model:
+  arch: dualcodec         # arch knobs restored from the v9b checkpoint cfg
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.5
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  post_base: 32           # 577k POST per codec (1.24M total)
+  qp_ref: [20, 51]
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/got10k_val.json
+  num_frames: 8
+  frame_size: 128
+  temporal_stride: 3
+
+train:                    # unused by evaluate(); kept for CLI compatibility
+  epochs: 1
+  batch_size: 2
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+
+eval:
+  split: test
+  include_proxy: false
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium
+  max_seqs: 120
+  max_frames: 48
+  codec_chunk: 16

@@ -1,0 +1,113 @@
+# =============================================================================
+# COCO DETECTION — train the preprocessor for the image regime (All-Intra, T=1).
+#
+# Why this config exists. The AR recipe trains on 16-frame clips and its bit
+# savings come largely from the TEMPORAL module (M3 freezes static background →
+# near-zero inter residual). A measured zero-shot transfer of that checkpoint to
+# image detection is significantly rate-HARMFUL (+2.29% [+0.43,+4.86] h264 for
+# the PRE arm, +6.71% [+4.64,+8.52] for the sandwich, n=500 COCO val2017, mAP
+# axis, 2026-09-17): on images M3 is inert and what remains is M1, which is a
+# global sharpening that costs bits and buys no detector accuracy. So the image
+# regime needs its own preprocessor.
+#
+# What is identical to the AR recipe: the model (PRE 44k + POST 2.29M), the loss
+# form, the schedule shape. What differs: the codec is INTRA-ONLY (no inter
+# prediction to save the residual), the clips are single frames, and L_Acc is a
+# frozen COCO detector's own detection loss instead of a classifier's CE.
+#
+# Evaluation is NOT in the engine: ops/probe_detection.py runs the same 3-arm
+# protocol on COCO val2017 and reports BD-rate on the mAP axis with a bootstrap
+# CI (that path is validated; the boxes it submits are converted to COCO xywh).
+#
+# Pre-registered reading (first run):
+#   * gate: the trained PRE must not increase bpp at equal mAP — the AR
+#     checkpoint's failure mode was +12% bits at every QP
+#   * win: BD(prep vs anchor) < 0 and BD(sandwich) < BD(prep) on at least one
+#     codec, with the mAP curve of the sandwich not below the anchor's
+#   * null/worse: report it; the detection direction then needs a different
+#     mechanism (saliency-guided spatial selection is the next rung, and unlike
+#     in AR it is well motivated here: mAP does not care about background)
+# =============================================================================
+
+device: auto
+out_dir: outputs/sandwich_coco_det
+seed: 0
+
+task:
+  name: object_detection
+  backbone: fasterrcnn_resnet50_fpn    # CTC uses Detectron2 X101-FPN
+  image_size: 320
+  score_thresh: 0.05
+
+model:
+  arch: sandwich
+  # --- PRE half (same UP-VCM as the AR runs) ---
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.0          # no DINOv2 target for images (saliency head is free)
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  gate: false
+  w_budget: 0.0
+  # --- POST half ---
+  post_base: 64
+  post_temporal: false      # nothing temporal to exploit at T=1
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: false              # ALL-INTRA: images have no inter prediction
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/coco_det.json
+  frame_size: 320
+  max_train_items: 20000
+  max_val_items: 2000
+
+loss:
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001
+  tau: 0.0                  # temporal consistency is meaningless at T=1
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0                   # pin post(codec(pre(x))) toward the source pixels
+  rho: 0.0                  # S-head distillation off: no teacher saliency here
+  use_task_mask: false      # detector gradient-saliency masking is a later rung
+
+train:
+  epochs: 8
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 3
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true
+  finetune: false
+
+eval:
+  split: val
+  include_proxy: false
+  per_sequence: false
+  batch_size: 4
+  num_workers: 2
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

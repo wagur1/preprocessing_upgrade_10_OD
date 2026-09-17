@@ -1,0 +1,68 @@
+# Action recognition on Kinetics-400 (paper's primary task).
+# Frozen r3d_18 analyzer; only the preprocessor is trained.
+
+device: auto
+out_dir: outputs
+seed: 0
+
+task:
+  name: action_recognition
+  backbone: r3d_18        # r3d_18 | mc3_18 | r2plus1d_18 (all Kinetics-400)
+  clip_size: 112          # analyzer input size (resized internally)
+
+model:                    # rate- & motion-conditioned U-Net preprocessor
+  base_ch: 32             # U-Net width at full resolution
+  res_scale: 1.0          # scale on the learned residual (out = x + res_scale*delta)
+  cond_dim: 1             # rate-condition width (1 = normalised QP; FiLM input)
+  qp_ref: [20, 51]        # QP range mapped to the [0,1] condition level
+
+codec:                    # training-time differentiable proxy
+  kind: compressai        # compressai | virtual (block-DCT proxy matched to x264/x265)
+  model: bmshj2018-factorized   # (compressai kind only) CompressAI zoo model
+  qualities: [1, 2, 3, 5, 8] # includes every quality used by qp_to_quality
+  # --- virtual-codec knobs (used only when kind: virtual) ---
+  block: 8                # DCT block size
+  inter: true             # closed-loop P-frame prediction (previous reconstruction)
+  colorspace: yuv420      # C1 (5.1): rgb | yuv420 (match -pix_fmt yuv420p)
+  chroma_step_scale: 2.0  # C1: chroma quant offset (~+6 QP at QP50)
+  step_coarse: 3.0        # quant step at the LOWEST quality id (coarsest, fewest bits) -> ~0.08 bpp
+  step_fine: 1.0          # quant step at the HIGHEST quality id (finest, most bits) -> ~0.4 bpp
+  # q_steps: {1: 3.0, 2: 2.2, 3: 1.8, 5: 1.3, 8: 1.0}  # explicit override (calibrated to x264/x265 bpp band)
+
+
+data:
+  index: data/index/kinetics_3gb.json
+  num_frames: 16
+  frame_size: 128         # compression resolution (multiple of 64)
+  temporal_stride: 2
+
+loss:                     # L = lam_task*L_task + omega*L_distill + beta*bpp + tau*L_temp + delta*|x_pre-x| + gamma*TV + mu*L_D
+  lam_task: 1.0           # task accuracy (cross-entropy)
+  omega: 0.5              # frozen-analyzer feature distillation (Yang et al. 0.5)
+  beta: 0.1               # rate (bpp); raise until compression actually bites
+  tau: 0.1                # temporal consistency (preserve inter-frame motion)
+  delta: 0.0              # L1 edit-magnitude |x_pre-x| (edit sparsity; 0 = off, raise to curb bit-adding edits)
+  gamma: 0.0              # TV of x_pre (codec-agnostic bit cost; 0 = off, raise to help x264/x265 transfer)
+  mu: 0.0                 # MSE-to-source L_D (0 = off). Paper preset (with codec.kind: virtual): mu=10, beta=0.01, gamma=0
+
+train:
+  epochs: 5
+  max_steps: null         # set an int to cap steps (quick Kaggle runs)
+  batch_size: 4
+  num_workers: 2
+  lr: 1.0e-4
+  qp_list: [30, 35, 40, 45, 50]   # C2 (5.1): in-grid protocol = eval QPs, no extrapolation gap
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}   # monotonic: QP up -> quality down
+  cosine: true            # cosine LR decay across all training steps
+  patience: 5             # early stop after N epochs w/o val-loss improvement (0 = off)
+  min_delta: 1.0e-4       # min val-loss drop that counts as an improvement
+  val_max_batches: 20     # cap val batches/epoch (bounds the early-stop probe cost)
+  resume: false           # continue from outputs/checkpoints/preprocessor_last.pth
+  finetune: false         # load weights with a fresh optimizer/schedule
+
+eval:
+  split: test
+  batch_size: 4
+  num_workers: 2
+  qp_list: [30, 35, 40, 45, 50]   # H.264/H.265 anchor QPs (paper range)
+  preset: medium

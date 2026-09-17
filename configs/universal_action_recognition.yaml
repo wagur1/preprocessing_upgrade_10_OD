@@ -1,0 +1,107 @@
+# =============================================================================
+# UPGRADE-5.1 headline config: Universal analyzer-agnostic video preprocessing
+# for machines, before a FROZEN standard codec (x264/x265).
+#
+# Contributions wired here (see README.md / docs/MODEL.md / docs/IMPROVEMENTS.md):
+#   A1  multi-teacher panel + HELD-OUT analyzer generalisation   (upgrade-3)
+#   A2  task-importance spatial mask steering the edit/TV penalty (upgrade-3)
+#   A3  real-codec calibration: soft->hard quant anneal + STE stage 2 (upgrade-3)
+#   C1  yuv420 colourspace proxy: BT.601 + 2x2 chroma subsample + chroma
+#       quant offset, matching -pix_fmt yuv420p (upgrade-5.1, DEFAULT ON)
+#   C2  in-grid QP protocol: train exactly on the eval QPs [30..50] (upgrade-5.1)
+#
+# Only the preprocessor is trained; every teacher AND the codec are frozen.
+# =============================================================================
+
+device: auto
+out_dir: outputs
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  # ---- A1: the frozen TEACHER PANEL the preprocessor trains against ----------
+  # >1 backbone => MultiTeacherAnalyzer. "sample" draws one teacher/step (~1x
+  # analyzer cost, acts as a regulariser); "mean" averages all (Nx cost, stable).
+  teachers: [r3d_18, mc3_18]        # Kinetics-400 video ResNets
+  teacher_sampling: sample          # sample | mean
+  # teacher_weights: [1.0, 1.0]     # optional per-teacher loss weights
+  backbone: r3d_18                  # fallback single backbone (if teachers unset)
+
+model:
+  base_ch: 32
+  res_scale: 1.0
+  max_relative_edit: 0.25  # hard safety envelope: one pass cannot erase the clip
+  cond_dim: 1
+  # ---- D1 (upgrade-6): structural saliency gating -----------------------------
+  # x_pre = x + (1 - M) * edit, M = frozen-analyzer task saliency in [0,1].
+  # Task-critical pixels become EXACT identity by construction: no loss term
+  # can trade their accuracy for rate. 5.1's 11-variant loss campaign showed
+  # the QP30-gap failure is structural (best mean gap -0.213 with mu=3, omega=2,
+  # never passing -0.05) -- D1 removes the trade-off from optimization entirely.
+  # Loss weights below stay IDENTICAL to 5.1: the gate is the single changed
+  # variable, so any delta vs eval_2/eval_5/eval_10 attributes to D1.
+  gate: true
+  qp_ref: [20, 51]
+
+codec:                              # differentiable TRAINING proxy
+  kind: virtual                     # virtual (block-DCT, matched to x26x) | compressai | ste
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420                # C1: rgb | yuv420 (match -pix_fmt yuv420p)
+  chroma_step_scale: 2.0            # C1: chroma quant offset (~+6 QP at QP50)
+  step_coarse: 3.0                  # coarsest quant step (fewest bits)
+  step_fine: 1.0                    # finest quant step (most bits)
+  anneal: 1.0                       # A3: ramp soft(noise)->hard(round) quant over training (0=off)
+  # ---- stage-2 STE calibration (set kind: ste) -------------------------------
+  # ste_codec: h265                 # real codec run in the forward pass
+  # ste_preset: medium
+
+data:
+  index: data/index/kinetics_3gb.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:   # L = lam_task*L_task + omega*L_distill + beta*bpp + tau*L_temp + delta*|x_pre-x| + gamma*TV(+mask) + mu*L_D
+  lam_task: 1.0
+  omega: 0.5              # frozen-teacher feature distillation (Yang et al. 2024)
+  # Paper-style virtual-codec balance. The previous mu=0 objective had a trivial
+  # solution: erase the clip, obtain near-zero bpp, and lose all task accuracy.
+  beta: 0.01
+  tau: 0.1              # temporal consistency
+  delta: 0.02            # A2: masked L1 edit magnitude (background only)
+  gamma: 0.01            # conservative masked background smoothing
+  mu: 10.0               # L_D is required with the block-DCT/STE path to prevent erasure
+  use_task_mask: true    # A2: weight delta/gamma by frozen-teacher saliency
+
+train:
+  epochs: 5
+  max_steps: null        # cap steps for quick Kaggle runs (e.g. 300)
+  reg_warmup_frac: 0.5   # let task/distillation establish a useful basin before smoothing bites
+  batch_size: 4
+  num_workers: 2
+  lr: 1.0e-4
+  # In-grid protocol: train every operating point used by the final BD curve.
+  # Distinct proxy qualities also make STE map each quality to one real QP.
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 5
+  min_delta: 1.0e-4
+  val_qp_mode: all       # select checkpoints on the mean objective over all QPs
+  val_max_batches: 5     # all-QP validation is 5x the previous mid-QP validation
+  resume: false
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false              # paper tables use only real H.264/H.265; true = proxy debug curve
+  per_sequence: true                # sequence_points.csv + sequence_bd_rate.csv/json
+  batch_size: 4
+  num_workers: 2
+  # ---- A1: generalisation test -- a backbone NOT in task.teachers ------------
+  held_out_backbone: r2plus1d_18    # set null to evaluate in-domain (r3d_18) instead
+  qp_list: [30, 35, 40, 45, 50]     # x264/x265 anchor QPs (paper range)
+  preset: medium

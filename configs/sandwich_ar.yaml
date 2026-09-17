@@ -1,0 +1,95 @@
+# =============================================================================
+# SANDWICH — v8 model (docs/MODEL_SANDWICH.md): UP-VCM PRE + restoration POST
+# around the frozen codec.
+#
+#   x -> pre(x) -> x264/x265 (frozen) -> decode -> post(x_hat) -> analyzer
+#
+# POST costs zero bits (runs after decode). It restores codec-destroyed
+# structure, letting PRE cut bits harder than a pre-only design can.
+# Protocol keys (data/codec/eval) identical to the v7 UP-VCM config for
+# same-instrument comparison; eval additionally reports the decomposition
+# arms: prep-only vs sandwich on the same checkpoint.
+# =============================================================================
+
+device: auto
+out_dir: outputs/sandwich
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18
+
+model:
+  arch: sandwich          # SandwichPreprocessor (src/models/sandwich.py)
+  # --- PRE half (UP-VCM) ---
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.5
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  gate: false
+  # --- POST half ---
+  post_base: 32           # restoration UNet width (~92k params)
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/kinetics_hash_split.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001
+  tau: 0.05
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0                # pins post(codec(pre(x))) toward source pixels
+  rho: 1.0               # S-head distillation (PRE half)
+  use_task_mask: true
+
+train:
+  epochs: 16
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 4
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

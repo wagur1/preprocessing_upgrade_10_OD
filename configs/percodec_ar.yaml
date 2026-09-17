@@ -1,0 +1,92 @@
+# =============================================================================
+# v9: PER-CODEC POST — codec-conditioned restoration (docs/MODEL_PERCODEC.md)
+#
+# Evidence-driven design from v8's 8-experiment sweep:
+#   E2 (POST-STE-h265) h264 −5.89 / STE (POST-STE-h265 in-loop) h265 −3.56
+#   E1 (POST-STE-x264) −4.49/−1.96 — single POST cannot win both codecs.
+# v9: ONE shared restoration trunk + codec embedding via FiLM — gradient flow
+# specialises per codec while sharing the common deblock/dering basis.
+# =============================================================================
+
+device: auto
+out_dir: outputs/percodec
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18
+
+model:
+  arch: percodec_sandwich
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.5
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  gate: false
+  post_base: 32           # same trunk size as v8 (capacity study = E4/ablation)
+
+codec:
+  kind: ste               # TRAIN THROUGH THE REAL CODECS from the start
+  ste_codec: h265         # initial; alternated per step by ste_alternate
+  ste_alternate: true     # v9: each step sees x264 OR x265 (never one-sided)
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/kinetics_hash_split.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001
+  tau: 0.05
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0
+  rho: 1.0
+  use_task_mask: true
+
+train:
+  epochs: 2               # STE calibration schedule (400-4000 steps scale)
+  max_steps: 1500
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 3.0e-5
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: false
+  patience: 0
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true
+  finetune: true          # warm-start semantics: load best ckpt, fresh optim
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

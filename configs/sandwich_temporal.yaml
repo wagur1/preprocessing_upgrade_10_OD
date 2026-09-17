@@ -1,0 +1,116 @@
+# =============================================================================
+# TEMPORAL POST — the restorer finally sees more than one frame.
+#
+# Single-variable change vs the E4 record recipe (configs/sandwich_ar.yaml with
+# post_base=64, seed 0): the ONLY difference is `model.post_temporal: true`.
+# Same capacity (2.3M POST), same loss weights, same schedule — so the A/B
+# against eval_e4_full (-5.71 / -4.22 at n=1159) isolates the temporal path.
+#
+# Why: the POST currently flattens (B,T) and restores each frame alone, while
+# codec artifacts are strongly temporally correlated — I vs P frames have
+# different error statistics, damage propagates along the GOP, and flicker is
+# by definition a temporal signal. The neighbours carry the same content coded
+# at a different point in the prediction chain, which is information a
+# per-frame filter structurally cannot see. Costs zero bits (decoder-side) and
+# ~0.1% extra params (one 6->base conv), so any gain is free in rate terms.
+#
+# The branch is zero-initialised and additive into a live trunk: behaviour at
+# init equals the per-frame POST exactly (a warm start from E4 is
+# behaviour-preserving) and, unlike the gate x module products elsewhere in this
+# repo, its gradient is non-zero at step 0 (tests/test_post_temporal.py).
+#
+# Pre-registered reading (docs/RUN_DESIGN_temporal.md):
+#   * gate: |in_conv_t.weight| > 1e-3 and the restored output differs from the
+#     per-frame path (the branch is actually used, not just alive)
+#   * if BD improves on at least one codec by >= 0.5 pp at n=1159 with the gap
+#     rule PASS -> the temporal direction is real; scale it (window > 1, or a
+#     recurrent/BasicVSR-style alignment) as the next rung
+#   * if BD is flat or worse -> per-frame restoration is sufficient at this
+#     capacity; report it and fall back to POST scaling (4.6M), which is the
+#     measured monotone lever.
+# =============================================================================
+
+device: auto
+out_dir: outputs/sandwich_temporal
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18
+
+model:
+  arch: sandwich
+  # --- PRE half (UP-VCM) — identical to E4 ---
+  s_ch: 16
+  editor_ch: 24
+  cond_dim: 1
+  dino_weight: 0.5
+  dino_name: dinov2_vits14
+  motion_tau: 0.1
+  gate: false
+  w_budget: 0.0          # legacy free scale: the PRE stays exactly E4's
+  # --- POST half ---
+  post_base: 64          # 2.3M, same as E4
+  post_temporal: true    # <- THE single change
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  colorspace: yuv420
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0
+
+data:
+  index: data/index/kinetics_hash_split.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001
+  tau: 0.05
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0
+  rho: 1.0
+  use_task_mask: true
+
+train:
+  epochs: 16
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 4
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true           # survives the 12h session cap (resumes across sessions)
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

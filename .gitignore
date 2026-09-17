@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+outputs/
+ops/_push/
+data/index/*.json
+*.pth

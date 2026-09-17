@@ -1,0 +1,80 @@
+# Object tracking on GOT-10k (the paper's second task) -- FULL implementation.
+#
+# Pipeline: preprocessor -> CompressAI -> SiamFC tracker. Only the preprocessor
+# is trained (SiamFC + codec frozen). L_Acc is the SiamFC balanced-logistic
+# response loss; evaluation runs the tracker over each GOT-10k val sequence and
+# reports the real success-plot AUC (+ AO, SR@0.5/0.75) on the test split at each rate point, then
+# BD-Rate of prep+proxy vs the same proxy / H.264 / H.265 anchors.
+#
+# The default tracker is the self-contained SiamFC (needs no extra install). To
+# use the paper's exact trackers (KYS/DiMP/ATOM/PrDiMP) install pytracking
+# (scripts/install_pytracking.sh) and see src/tasks/pytracking_adapter.py.
+
+device: auto
+out_dir: outputs
+seed: 0
+
+task:
+  name: tracking
+  backbone: resnet18      # SiamFC feature backbone (frozen, up to layer2)
+  exemplar_size: 127      # template patch (px)
+  search_size: 255        # search patch (px)
+  pos_radius: 2.0         # response-map positive radius (in response cells)
+
+model:
+  base_ch: 32             # U-Net width at full resolution
+  res_scale: 1.0          # scale on the learned residual
+  cond_dim: 1             # rate-condition width (1 = normalised QP; FiLM input)
+  qp_ref: [20, 51]        # QP range mapped to the [0,1] condition level
+
+codec:
+  kind: compressai        # compressai | virtual (block-DCT proxy matched to x264/x265)
+  model: bmshj2018-factorized
+  qualities: [1, 2, 3, 5, 8]
+  # --- virtual-codec knobs (used only when kind: virtual) ---
+  block: 8                # DCT block size
+  inter: true             # closed-loop P-frame prediction (previous reconstruction)
+  colorspace: yuv420      # C1 (5.1): rgb | yuv420 (match -pix_fmt yuv420p)
+  chroma_step_scale: 2.0  # C1: chroma quant offset (~+6 QP at QP50)
+  step_coarse: 3.0        # quant step at the LOWEST quality id (coarsest, fewest bits) -> ~0.08 bpp
+  step_fine: 1.0          # quant step at the HIGHEST quality id (finest, most bits) -> ~0.4 bpp
+
+data:
+  # GOT-10k index built by src/data/prepare_got10k.py (round-robin capped to 3GB).
+  # The test split carries ground-truth boxes and is used for final AUC reporting.
+  index: data/index/got10k_3gb.json
+  num_frames: 8           # frames per training clip
+  frame_size: 256         # working square resolution (multiple of 64 -> no codec pad)
+  temporal_stride: 3      # frame gap within a training clip
+
+loss:                     # L = lam_task*L_task + omega*L_distill + beta*bpp + tau*L_temp + delta*|x_pre-x|
+  lam_task: 1.0           # task accuracy (SiamFC balanced-logistic)
+  omega: 0.5              # frozen-backbone feature distillation
+  beta: 0.1               # rate (bpp); raise until compression bites
+  tau: 0.1                # temporal consistency
+  delta: 0.0              # L1 edit-magnitude |x_pre-x| (edit sparsity; 0 = off)
+  gamma: 0.0              # TV of x_pre (codec-agnostic bit cost; 0 = off, raise to help x264/x265 transfer)
+  mu: 0.0                 # MSE-to-source L_D (0 = off). Paper preset (with codec.kind: virtual): mu=10, beta=0.01, gamma=0
+
+train:
+  epochs: 5
+  max_steps: null
+  batch_size: 2
+  num_workers: 2
+  lr: 1.0e-4
+  qp_list: [30, 35, 40, 45, 50]   # C2 (5.1): in-grid protocol = eval QPs, no extrapolation gap
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}   # monotonic: QP up -> quality down
+  cosine: true            # cosine LR decay across all training steps
+  patience: 5             # early stop after N epochs w/o val-loss improvement (0 = off)
+  min_delta: 1.0e-4       # min val-loss drop that counts as an improvement
+  val_max_batches: 20     # cap val batches/epoch (bounds the early-stop probe cost)
+  resume: false           # continue from outputs/checkpoints/preprocessor_last.pth
+  finetune: false
+
+eval:
+  split: test
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium
+  max_seqs: 30            # cap test sequences evaluated; null = all
+  max_frames: 48          # cap frames per sequence (bounds eval cost); null = all
+  codec_chunk: 16         # run prep+CompressAI over sequences in T-chunks (bounds VRAM)

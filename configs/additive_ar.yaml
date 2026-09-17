@@ -1,0 +1,123 @@
+# =============================================================================
+# ADDITIVE ROUND (§10 of tong-ket-vcm.txt / docs/RUN_DESIGN_additive.md)
+#
+# Retrain the Zhao-style two-branch ADDITIVE preprocessor (9,795 params, tree
+# pinned by the additive run's best.pt) inside the canonical harness.
+#
+#   * objective  : Zhao's exact 3-term L = L_Acc + 10*(L_D + 0.001*L_R)
+#                  (mu=10, beta=0.001, everything else 0 -- the rate term is
+#                  decorative; alpha=10 dominates and the model trains for
+#                  ACCURACY, never learning about bits)
+#   * proxy      : virtual block-DCT + inter-frame P prediction + yuv420 (C1),
+#                  in-grid QP protocol (C2) -- supplies the distortion channel
+#                  only; the bit operating point is chosen AFTER training,
+#                  gradient-free, on measured x264/x265 bpp (model.strength)
+#   * data       : canonical hash split (scripts/build_train_index.py) --
+#                  train ~8.6k / val ~1k / test = the canonical 1159 (NEVER
+#                  touched at train time)
+#   * teachers   : A1 panel [r3d_18, mc3_18], sampled per step; eval on the
+#                  held-out r2plus1d_18 (the canonical eval analyzer)
+#
+# All 6 subtractive axes are closed (R-D neutrality x7, per-codec law); only
+# an additive (gap >= 0) mechanism can reach dual-codec -8%.
+# =============================================================================
+
+device: auto
+out_dir: outputs/additive_ar
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112          # analyzer input size (resized internally)
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18        # fallback single backbone (unused when teachers set)
+
+model:
+  arch: additive          # AdditivePreprocessor (src/models/additive.py)
+  temporal_frames: 8      # temporal-context frames stacked on channels
+  strength: 1.0           # eval-time operating point (NOT restored from ckpt)
+  gate: false             # ungated: the additive edit may touch every pixel
+  qp_ref: [20, 51]
+
+codec:                    # differentiable TRAINING proxy (distortion channel)
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true             # closed-loop P-frame prediction
+  colorspace: yuv420      # C1: match -pix_fmt yuv420p
+  chroma_step_scale: 2.0
+  # STEPS ARE IN [0,1] PIXEL UNITS, NOT [0,255]. The D10 round shipped
+  # 3.0/1.0 -- JPEG-plausible numbers in 8-bit units, 255x too coarse here --
+  # and its whole 5-quality grid ran at 9.7-19.2 dB PSNR against real x264's
+  # 31.4-21.5 dB over QP30..50 (u6_big4/proxy_target.py). The proxy's FINEST
+  # setting was worse than x264's WORST, so the analyzer was at chance on every
+  # frame it ever saw and L_task never carried a gradient (task CE 8.48 -> 8.04,
+  # never below ln(400)=5.99). These values measure +2.4..+4.4 dB vs real x264
+  # at the mapped QP -- the distortion channel the objective actually needs.
+  # bpp lands 5-20x above x264, which is fine and deliberate: beta=0.001 makes
+  # the rate term decorative (see the header). Do NOT "fix" bpp by coarsening
+  # the step -- that is exactly the mistake that voided D10.
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0             # A3: soft->hard quantiser anneal
+
+data:
+  index: data/index/kinetics_hash_split.json   # scripts/build_train_index.py
+  num_frames: 16
+  frame_size: 128         # train == canonical-eval geometry (self-consistent round)
+  temporal_stride: 2
+
+loss:                     # L = lam_task*L_task + mu*L_D + beta*bpp  (Zhao form)
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001             # lambda of Zhao et al. (alpha=10, lambda=0.001)
+  tau: 0.0
+  delta: 0.0
+  gamma: 0.0              # TV of x_pre -- WRONG TARGET for an additive model:
+                          # source-dominated. Swept 0.01/0.03/0.1 on 2026-08-31,
+                          # all three residuals within 0.7% RMS of gamma=0.
+  kappa: 0.0              # RPP adaptive-DCT rate proxy on x_pre (arXiv:2301.10455):
+                          # ZigZag mask protects LOW freqs, adaptive threshold
+                          # protects STRONG high freqs, only sub-mean high-freq
+                          # coefficients are pushed to zero. Unlike gamma/gamma_res
+                          # this can push rate BELOW the anchor. L_dct ~ 0.058 vs
+                          # L_task ~ 3.3, so biting range is 1-10; <=0.1 decorative.
+  kappa_t: 0.0            # RPP-style adaptive DCT on SPATIO-TEMPORAL blocks (8x8x4).
+                          # Additive to kappa, which is per-frame and therefore blind
+                          # to the axis the model was measured escaping into (added
+                          # spatial HF +24.2%->+6.9% while TVt/RMS rose 0.49->0.70).
+                          # L_dct3d ~ 0.0095 vs L_task ~ 3.3 -> biting range 35-70.
+  gamma_res: 0.0          # TV of the RESIDUAL x_pre-x. This is the bit-cost
+                          # lever for an additive edit. Size it against L_task
+                          # (~3.3): TV(res) ~ 6e-3, so <1 is decorative, >=10 bites.
+  mu: 10.0                # alpha=10 MSE-to-source on the proxy reconstruction
+  use_task_mask: false
+
+train:
+  epochs: 6               # ~1,081 optimizer steps/epoch (batch 8) ~ 90 min/epoch fp32
+  max_steps: null
+  reg_warmup_frac: 0.0    # nothing to warm: the objective is exact from step 0
+  batch_size: 8           # effective batch 8 == the additive run's global batch
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0          # the additive run's safety net (no bounded-edit envelope)
+  qp_list: [30, 35, 40, 45, 50]        # C2 in-grid protocol
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 3
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true            # survive Kaggle session death (12h cap)
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18    # the canonical eval analyzer (A1 claim)
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

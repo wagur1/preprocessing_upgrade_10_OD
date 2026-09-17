@@ -1,0 +1,76 @@
+# Recommended high-robustness recipe for the paper comparison.
+#
+# Stage 1 uses the block-DCT proxy and updates several QPs per step.  This gives
+# the rate-conditioned editor a direct gradient from the whole RD curve instead
+# of relying on a noisy single-QP sample.  Stage 2 can be run with
+# ``codec.kind=ste`` and ``codec.ste_codec=both`` to calibrate against both real
+# deployment codecs (see docs/MODEL.md).
+
+device: auto
+out_dir: outputs/robust_transfer
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18
+
+model:
+  base_ch: 32
+  res_scale: 1.0
+  max_relative_edit: 0.25
+  cond_dim: 1
+  qp_ref: [20, 51]
+
+codec:
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true
+  closed_loop: true
+  step_coarse: 3.0
+  step_fine: 1.0
+  anneal: 1.0
+
+data:
+  index: data/index/kinetics_3gb.json
+  num_frames: 16
+  frame_size: 128
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.5
+  beta: 0.01
+  tau: 0.1
+  delta: 0.02
+  gamma: 0.03              # transfer-oriented setting from the repo ablation
+  mu: 10.0
+  use_task_mask: true
+
+train:
+  epochs: 5
+  max_steps: null
+  reg_warmup_frac: 0.5
+  qp_per_step: 3
+  batch_size: 4
+  num_workers: 2
+  lr: 1.0e-4
+  qp_list: [22, 27, 32, 37, 42]
+  qp_to_quality: {22: 5, 27: 3, 32: 2, 37: 1, 42: 1}
+  cosine: true
+  patience: 5
+  min_delta: 1.0e-4
+  val_max_batches: 20
+  resume: false
+  finetune: false
+
+eval:
+  split: test
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

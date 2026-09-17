@@ -1,0 +1,92 @@
+# =============================================================================
+# UP-VCM — the v7 NEW MODEL (docs/MODEL_UPVCM.md)
+#
+# Not the Zhao additive editor. A self-sufficient importance head S (distilled
+# from multi-teacher saliency + DINOv2 energy) drives three zero-init-gated
+# modules: M1 background decimation (luma-preserving blur, coarse chroma),
+# M2 W-gated ROI editor with FiLM(QP), M3 temporal background stabilisation.
+# Identity at init; analyzer- AND foundation-free at deploy.
+#
+# Protocol keys (data/codec/eval) are bit-identical to the additive_qpc
+# lineage config so results are comparable on the same instrument.
+# =============================================================================
+
+device: auto
+out_dir: outputs/upvcm
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112          # analyzer input size (resized internally)
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18        # fallback single backbone (unused when teachers set)
+
+model:
+  arch: upvcm             # UPVCMPreprocessor (src/models/upvcm.py)
+  s_ch: 16                # importance head width
+  editor_ch: 24           # ROI editor UNet width (~87k params total)
+  cond_dim: 1             # FiLM condition width (normalised QP)
+  dino_weight: 0.5        # DINOv2 blend in the distill target (0 = teacher only)
+  dino_name: dinov2_vits14
+  motion_tau: 0.1         # M3 static-gate motion scale
+  gate: false             # UP-VCM never uses an external edit gate
+
+codec:                    # differentiable TRAINING proxy (distortion channel)
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true             # closed-loop P-frame prediction
+  colorspace: yuv420      # C1: match -pix_fmt yuv420p
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0             # A3: soft->hard quantiser anneal
+
+data:
+  index: data/index/kinetics_hash_split.json   # scripts/build_train_index.py
+  num_frames: 16
+  frame_size: 128         # train == canonical-eval geometry
+  temporal_stride: 2
+
+loss:
+  lam_task: 1.0
+  omega: 0.0              # feature distill OFF (omega=1.0 teacher-overfit lesson)
+  beta: 0.001             # light proxy-rate pressure (Zhao lambda)
+  tau: 0.05               # light temporal consistency (M3 owns temporal)
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0             # lineage bit-restrainer (adaptive DCT, arXiv:2301.10455)
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 3.0                 # weaker than additive's 10 — room for M1 background edits
+  rho: 1.0                # S-head distillation (the UP-VCM-specific term)
+  use_task_mask: true     # supplies the S distill target (NOT an edit gate)
+
+train:
+  epochs: 16              # lineage schedule (kappa=10 best was 14/16)
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]        # C2 in-grid protocol
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 4
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true            # survive Kaggle session death (12h cap)
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18    # the canonical eval analyzer
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vcm-preprocess"
+version = "0.1.0"
+description = "Adaptive preprocessing and BD-rate optimization toolkit for Video Coding for Machines"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.0", "torchvision>=0.15", "opencv-python-headless", "numpy", "scipy", "pyyaml", "tqdm", "matplotlib", "pandas"]
+
+[project.optional-dependencies]
+image = ["Pillow>=9.0"]
+
+[project.scripts]
+vcm-preprocess = "vcm_preprocess.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vcm_preprocess*"]

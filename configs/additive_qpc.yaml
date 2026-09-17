@@ -1,0 +1,93 @@
+# =============================================================================
+# ROUND (b) — QP-CONDITIONED ADDITIVE EDIT (docs/RUN_DESIGN_qpc.md)
+#
+# Exact fork of the kappa=10 @16ep lineage's EFFECTIVE config
+# (additive_ar.yaml + train.epochs=16 + loss.kappa=10 -- the project best),
+# with exactly TWO deltas:
+#   * model.arch: additive_cond   (Zhao tree + zero-init FiLM, 10,131 params)
+#   * out_dir:    outputs/additive_qpc
+# Everything else is bit-identical to the lineage so the run is a clean
+# one-variable comparison (guard (iv) of the pre-registration).
+#
+# Mechanism: the kappa=10 edit is untargeted in rate (Δbpp +13-14% at QP30 for
+# a gap the codec didn't need; earns at QP45/50 only). The zero-init FiLM lets
+# training discover a QP-conditional edit amplitude -- small at light QP,
+# concentrated at heavy QP -- without changing anything at initialization.
+# =============================================================================
+
+device: auto
+out_dir: outputs/additive_qpc
+seed: 0
+
+task:
+  name: action_recognition
+  clip_size: 112          # analyzer input size (resized internally)
+  teachers: [r3d_18, mc3_18]
+  teacher_sampling: sample
+  backbone: r3d_18        # fallback single backbone (unused when teachers set)
+
+model:
+  arch: additive_cond     # AdditiveCondPreprocessor (src/models/additive_cond.py)
+  temporal_frames: 8      # temporal-context frames stacked on channels
+  strength: 1.0           # eval-time operating point (NOT restored from ckpt)
+  cond_dim: 1             # FiLM condition width (normalised QP)
+  gate: false             # ungated: spatial targeting is round b2, not this one
+  qp_ref: [20, 51]
+
+codec:                    # differentiable TRAINING proxy (distortion channel)
+  kind: virtual
+  qualities: [1, 2, 3, 5, 8]
+  block: 8
+  inter: true             # closed-loop P-frame prediction
+  colorspace: yuv420      # C1: match -pix_fmt yuv420p
+  chroma_step_scale: 2.0
+  step_coarse: 0.25
+  step_fine: 0.03
+  anneal: 1.0             # A3: soft->hard quantiser anneal
+
+data:
+  index: data/index/kinetics_hash_split.json   # scripts/build_train_index.py
+  num_frames: 16
+  frame_size: 128         # train == canonical-eval geometry (self-consistent round)
+  temporal_stride: 2
+
+loss:                     # L = lam_task*L_task + mu*L_D + beta*bpp  (Zhao form)
+  lam_task: 1.0
+  omega: 0.0
+  beta: 0.001             # lambda of Zhao et al. (alpha=10, lambda=0.001)
+  tau: 0.0
+  delta: 0.0
+  gamma: 0.0
+  kappa: 10.0             # LINEAGE VALUE: the project best's DCT rate penalty
+  kappa_t: 0.0
+  gamma_res: 0.0
+  mu: 10.0                # LINEAGE VALUE: alpha=10 MSE-to-source
+  use_task_mask: false    # round b2 lever, deliberately off (one variable)
+
+train:
+  epochs: 16              # LINEAGE VALUE: the kappa=10 lineage schedule
+  max_steps: null
+  reg_warmup_frac: 0.0
+  batch_size: 8
+  num_workers: 3
+  lr: 1.0e-4
+  clip_grad: 1.0
+  qp_list: [30, 35, 40, 45, 50]        # C2 in-grid protocol
+  qp_to_quality: {30: 8, 35: 5, 40: 3, 45: 2, 50: 1}
+  cosine: true
+  patience: 4
+  min_delta: 1.0e-4
+  val_qp_mode: all
+  val_max_batches: 5
+  resume: true            # survive Kaggle session death (12h cap)
+  finetune: false
+
+eval:
+  split: test
+  include_proxy: false
+  per_sequence: true
+  batch_size: 4
+  num_workers: 2
+  held_out_backbone: r2plus1d_18    # the canonical eval analyzer (A1 claim)
+  qp_list: [30, 35, 40, 45, 50]
+  preset: medium
