@@ -595,6 +595,13 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
                   "training from scratch")
     elif bool(tr.get("resume", False)) and last_path.exists():
         st = torch.load(last_path, map_location=device)
+        if tag == "object_detection" and (
+                st.get("cfg", {}).get("data", {}).get("od_split_fingerprint")
+                != cfg["data"]["od_split_fingerprint"]):
+            raise ValueError("Incompatible OD checkpoint split identity; start a fresh run")
+        if val_loader is not None and not ckpt_path.exists():
+            raise ValueError("Cannot resume with validation: historical best checkpoint "
+                             f"is missing ({ckpt_path}); restore the paired best and last.")
         pre.load_state_dict(st["model"])
         if st.get("opt"):
             opt.load_state_dict(st["opt"])
@@ -715,7 +722,6 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
                 stop = True
                 break
 
-        _save(last_path, epoch + 1)
         if val_loader is None:
             # Worth shouting about: with no validation there is no checkpoint
             # selection and no early stopping, so `preprocessor.pth` is just the
@@ -740,6 +746,9 @@ def _fit(cfg, pre, codec, analyzer, train_loader, val_loader, prep_batch,
             elif stop_es:
                 print(f"[train] early stop: no val gain in {patience} epochs", flush=True)
                 stop = True
+        # Resume must include this epoch's model-selection state, including the
+        # observation that triggers early stopping (or a max_steps exit).
+        _save(last_path, epoch + 1)
         if stop:
             break
 
@@ -827,14 +836,20 @@ def _train_detection(cfg: dict) -> str:
     the training loop only needs a differentiable L_Acc, which the frozen
     detector supplies.
     """
+    from .data.coco_det import validate_od_index
+
+    tr, d = cfg["train"], cfg["data"]
+    index = json.loads(Path(d["index"]).read_text())
+    d["od_split_fingerprint"] = validate_od_index(index)
     device = _device(cfg)
     pre, codec, analyzer = _build_models(cfg, device)
-    tr, d = cfg["train"], cfg["data"]
     common = dict(index_json=d["index"], frame_size=d.get("frame_size", 320))
     train_ds = CocoDetDataset(split="train", train=True,
                               max_items=d.get("max_train_items"), **common)
     val_ds = CocoDetDataset(split="val", train=False,
                             max_items=d.get("max_val_items"), **common)
+    if len(train_ds) < tr.get("batch_size", 4) or not len(val_ds):
+        raise ValueError("OD requires a nonempty validation split and at least one full training batch")
     train_loader = DataLoader(
         train_ds, batch_size=tr.get("batch_size", 4), shuffle=True,
         num_workers=tr.get("num_workers", 2), collate_fn=collate_coco_det,

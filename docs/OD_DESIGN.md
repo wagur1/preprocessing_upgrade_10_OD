@@ -82,6 +82,58 @@ không đánh nhau với proxy (nguyên nhân nghi phạm của thất bại "ph
 - Feature coding (cần NN phía decoder — niche khác).
 - Báo cáo số on-teacher: mọi số công bố phải ở protocol held-out + CI.
 
+## Training splits and CLI resume (2026-09-17 correction)
+
+`ops/push_detection_train.py` now takes exactly `--n-train` training images and
+`--n-val` held-out validation images from **train2017**, using a deterministic
+seeded split. All annotated **val2017** images are reserved for test/probes;
+validation loss must never select a checkpoint on the probe set. Generated and
+cached indexes are checked for nonempty splits, exact requested counts, duplicate
+or overlapping image IDs, and annotation provenance. The trainer persists a
+mount-independent split fingerprint in its checkpoint config.
+
+**Old OD indexes and checkpoints are incompatible.** They selected on val2017
+(or had no validation); do not resume them into this protocol or interpret their
+probe scores as held-out model-selection results. Remove the old cached index,
+choose a new output directory/run ID, and train fresh. Probe metric/Gaussian
+logic is unchanged; this does not undo any previous manual tuning on probe data.
+
+Fresh run (the command pushes a kernel when deliberately executed):
+
+```bash
+python ops/push_detection_train.py --commit <sha> --slug od-clean-1 \
+  --run-id od-clean --n-train 20000 --n-val 2000 --epochs 8 \
+  --overrides 'out_dir=outputs/od-clean loss.beta=0.001'
+```
+
+Resume by mounting the prior output dataset and naming the **exact directory**
+that contains both `preprocessor.pth` (historical best) and
+`preprocessor_last.pth` (latest optimizer/scheduler/validation state):
+
+```bash
+python ops/push_detection_train.py --commit <sha> --slug od-clean-2 \
+  --run-id od-clean --n-train 20000 --n-val 2000 --epochs 8 \
+  --dataset awsaf49/coco-2017-dataset,<owner>/<prior-output-dataset> \
+  --resume-checkpoint-dir /kaggle/input/datasets/<owner>/<prior-output-dataset>/outputs/od-clean/checkpoints \
+  --overrides 'out_dir=outputs/od-clean loss.beta=0.001'
+```
+
+Use the actual mount path; a dataset root with nested runs is rejected. There is
+no recursive checkpoint search or mtime ranking. Both files must have compatible
+run/config/split identities and consistent best/last state; a missing historical
+best is an error, never synthesized from last. Keep `--run-id` stable across
+continuation slugs (default is the slug). No resume option means fresh training;
+existing local checkpoints cause an error rather than an accidental restart.
+
+`--epochs` is retained alongside unrelated overrides; an explicit
+`train.epochs=...` override wins. It denotes the total epoch target, not extra
+epochs. Extending it preserves the engine's saved LR schedule rather than
+replanning cosine decay. Output/index overrides are shared by preparation,
+restore and training. Quote each override token containing spaces; the pusher
+preserves tokens with `shlex`. Split sizes control the dataset caps; conflicting
+cap overrides are rejected. Resume is epoch-boundary checkpointing, not
+mid-batch recovery or exact RNG replay.
+
 ## 7. Rủi ro đã biết
 
 1. Detector **dùng ngữ cảnh** → phá nền quá tay ở bitrate thấp có thể mất vật nhỏ. Đây chính

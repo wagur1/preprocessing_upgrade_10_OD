@@ -66,6 +66,8 @@ codec:
   anneal: 1.0
 
 data:
+  # Built by the OD pusher: train + held-out validation from train2017;
+  # val2017 is test-only. Legacy indexes/checkpoints require a fresh run.
   index: data/index/coco_det.json
   frame_size: 320
   max_train_items: 20000
@@ -104,7 +106,7 @@ train:
   finetune: false
 
 eval:
-  split: val
+  split: test
   include_proxy: false
   per_sequence: false
   batch_size: 4
