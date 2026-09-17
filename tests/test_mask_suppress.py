@@ -180,6 +180,46 @@ def test_protect_mask_requires_finite_matching_inputs():
                      torch.tensor([0.9]), torch.tensor([1]), 16)
 
 
+@pytest.mark.parametrize("position", [(0, 0), (0, 17), (15, 0), (30, 46)])
+def test_border_impulse_matches_reference(position):
+    from torchvision.transforms.functional import gaussian_blur
+    x = torch.zeros(1, 3, 1, 31, 47, dtype=torch.float64)
+    x[0, 1, 0, position[0], position[1]] = 1
+    result = suppress(x, torch.zeros(31, 47), 4)
+    reference = gaussian_blur(x[:, :, 0], [17, 17], [4., 4.])
+    torch.testing.assert_close(result[:, :, 0], reference, atol=1e-12, rtol=1e-12)
+    assert result[:, 0].count_nonzero() == 0
+
+
+@pytest.mark.parametrize("shape", [(1, 1), (3, 5), (3, 31), (31, 3), (31, 47)])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.float64])
+def test_constant_invariance_including_small_borders(shape, dtype):
+    x = torch.full((2, 3, 2, *shape), .375, dtype=dtype)
+    result = suppress(x, torch.zeros(shape), 4)
+    assert result.dtype == dtype
+    torch.testing.assert_close(result, x, atol=1e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.])
+def test_invalid_sigma_and_mask_rejected(bad):
+    x = torch.ones(1, 3, 1, 16, 16)
+    with pytest.raises(ValueError):
+        suppress(x, torch.zeros(16, 16), bad)
+    with pytest.raises(ValueError):
+        suppress(x, torch.full((16, 16), bad), 4)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_cross_device_masks_and_scores():
+    boxes = torch.tensor([[1., 2., 8., 9.]], device="cuda", dtype=torch.float64)
+    mask = protect_mask(boxes, torch.tensor([.9]), torch.tensor([1]), 32)
+    assert mask.device == boxes.device and mask.dtype == boxes.dtype
+    for device in ("cpu", "cuda"):
+        x = torch.rand(2, 3, 2, 32, 32, device=device)
+        out = suppress(x, mask.cpu() if device == "cuda" else mask, 4)
+        assert out.device == x.device and out.dtype == x.dtype
+
+
 def test_mask_from_detections_matches_manual_call():
     det = {"boxes": torch.tensor([[5.0, 5.0, 25.0, 25.0]]),
            "scores": torch.tensor([0.8]), "labels": torch.tensor([3])}
