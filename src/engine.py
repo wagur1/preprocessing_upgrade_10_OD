@@ -872,7 +872,7 @@ def evaluate(cfg: dict, ckpt_path: str, out_dir: str | None = None) -> dict:
                      "base_ch", "res_scale", "cond_dim", "max_relative_edit",
                      # upvcm arch knobs (must match training exactly)
                      "s_ch", "editor_ch", "dino_weight", "dino_name", "motion_tau",
-                     "post_base", "w_budget", "post_temporal")
+                     "post_base", "w_budget", "post_temporal", "qp_ref")
         for k in arch_keys:
             if k in ckpt_cfg["model"]:
                 cfg.setdefault("model", {})[k] = ckpt_cfg["model"][k]

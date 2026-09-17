@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 """Zero-shot detection probe: does the VCM preprocessor transfer to object detection?
 
-Standalone (no engine changes). Two stages in one run, because stage A is cheap
-and can kill the direction before stage B burns quota:
+Two stages in one run; stage A is a codec-free diagnostic, not an RD test:
 
   Stage A (no codec): mAP of a frozen COCO detector on x vs pre(x).
-      The PRE was trained on Kinetics clips at 128px. If its edit already
-      destroys detection accuracy at the probe resolution, no rate-accuracy
-      sweep can rescue it -> stop and report.
+      A loss here does not establish rate-distortion failure. By default the
+      requested codec sweep still runs; an explicit threshold can stop early.
 
   Stage B (codec sweep): the canonical 3-arm protocol on the mAP axis --
       anchor   codec(x)                 -> detector
@@ -16,8 +14,8 @@ and can kill the direction before stage B burns quota:
       BD-rate(mAP) per codec with a bootstrap CI over images.
 
 Everything else mirrors the group's protocol: real x264/x265 preset medium,
-QP 30-50, frozen checkpoints, per-image records so the CI is computed the same
-way as ops/merge_eval.py.
+QP 30-50, frozen checkpoints, and cached per-image xywh detections for paired
+N-image with-replacement bootstrap CIs, separately for each arm.
 
 Usage (Kaggle):
   python ops/probe_detection.py --images /kaggle/input/coco-2017-dataset/coco2017 \\
@@ -28,6 +26,7 @@ Usage (Kaggle):
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import random
 import sys
@@ -43,6 +42,9 @@ from src.codecs.standard import StandardCodec, ffmpeg_available  # noqa: E402
 from src.config import apply_overrides, load_config  # noqa: E402
 from src.engine import _build_models, _qp_norm, _rate_cond  # noqa: E402
 from src.metrics.bd_rate import bd_rate  # noqa: E402
+from src.metrics.detection_bootstrap import (  # noqa: E402
+    coco_map, paired_detection_bootstrap,
+)
 
 
 # ---------------------------------------------------------------- data -----
@@ -111,36 +113,6 @@ class Detector:
         return self.model(list(x))
 
 
-def coco_map(results, gt_by_id, image_ids, ann_meta):
-    """mAP@[.5:.95] and mAP@0.5 for the given predictions (pycocotools).
-
-    COCOeval.summarize() prints ~13 lines per call and the bootstrap makes
-    thousands of calls, so its output is captured and discarded — on a kernel
-    log stream that noise is both unreadable and slow."""
-    import contextlib
-    import io
-
-    from pycocotools import mask as _mask  # noqa: F401
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
-
-    coco_gt = COCO()
-    coco_gt.dataset = {"images": [{"id": i} for i in image_ids],
-                       "annotations": [a for i in image_ids for a in gt_by_id[i]],
-                       "categories": ann_meta["categories"]}
-    coco_gt.createIndex()
-    if not results:
-        return 0.0, 0.0
-    dt = coco_gt.loadRes(results)
-    ev = COCOeval(coco_gt, dt, "bbox")
-    ev.params.imgIds = list(image_ids)
-    ev.evaluate()
-    ev.accumulate()
-    with contextlib.redirect_stdout(io.StringIO()):
-        ev.summarize()
-    return float(ev.stats[0]), float(ev.stats[1])
-
-
 # ---------------------------------------------------------------- probe ----
 def _coco_box(b) -> list:
     """torchvision returns boxes as xyxy; COCO's bbox field is xywh.
@@ -180,13 +152,14 @@ def run(args) -> dict:
     cfg = apply_overrides(load_config(args.config),
                           [f"device={device.type}"])
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    ck_cfg = (state.get("cfg") or {}).get("model", {}) if isinstance(state, dict) else {}
-    # the POST width must match the checkpoint, whatever the yaml says
-    if "post_base" in ck_cfg:
-        cfg.setdefault("model", {})["post_base"] = int(ck_cfg["post_base"])
-        print(f"[probe] post_base from checkpoint: {ck_cfg['post_base']}")
+    ck_cfg = state.get("cfg") if isinstance(state, dict) else None
+    if isinstance(ck_cfg, dict) and isinstance(ck_cfg.get("model"), dict):
+        # Restore all stored model settings, including non-state_dict behavior
+        # such as qp_ref, strength and temporal flags. YAML only fills absent
+        # keys for legacy checkpoints; never manufacture checkpoint defaults.
+        cfg.setdefault("model", {}).update(deepcopy(ck_cfg["model"]))
     pre, codec, _ = _build_models(cfg, device, role="eval")
-    pre.load_state_dict(state["model"] if "model" in state else state)
+    pre.load_state_dict(state["model"] if "model" in state else state, strict=True)
     pre.eval()
     print(f"[probe] PRE+POST loaded from {args.ckpt}")
 
@@ -256,11 +229,12 @@ def run(args) -> dict:
               f"degenerate anchor curve.")
         results["verdict"] = "degenerate_anchor"
         return results
-    if ap_x > 0 and ap_p / ap_x < args.stage_a_threshold:
-        print(f"[probe] STAGE A FAILED at {results['size']}px: pre(x) keeps only "
+    if (args.stage_a_threshold is not None and ap_x > 0
+            and ap_p / ap_x < args.stage_a_threshold):
+        print(f"[probe] STAGE A threshold reached at {results['size']}px: pre(x) keeps only "
               f"{ap_p / ap_x:.2f} of the anchor mAP (< {args.stage_a_threshold}) "
-              f"-> the edit destroys detection content; stopping.")
-        results["verdict"] = "stage_A_fail"
+              f"-> stopping at the requested diagnostic threshold, not an RD verdict.")
+        results["verdict"] = "stage_A_threshold_stop"
         return results
 
     if args.stage == "a":
@@ -304,8 +278,6 @@ def run(args) -> dict:
         curves = {}
         for arm in arms:
             rates, aps = [], []
-            preds = [p for qp in qps for i, _ in [(k, v) for k, v in
-                     per_image[arm][(codec_name, qp)].items()] for p in _[1]]
             for qp in qps:
                 slot = per_image[arm][(codec_name, qp)]
                 rates.append(float(np.mean([v[0] for v in slot.values()])))
@@ -318,32 +290,16 @@ def run(args) -> dict:
         for arm in ("prep", "sandwich"):
             entry[f"bd_{arm}"] = bd_rate(curves["anchor"]["rate"], curves["anchor"]["mAP"],
                                          curves[arm]["rate"], curves[arm]["mAP"])
-        # bootstrap over images (resample the image set, recompute mAP per point)
         if args.bootstrap:
-            draws = []
-            rng = random.Random(0)
-            for d in range(args.bootstrap):
-                sub = [i for i in image_ids if rng.random() < 0.8]
-                cur = {}
-                for arm in arms:
-                    rates, aps = [], []
-                    for qp in qps:
-                        slot = per_image[arm][(codec_name, qp)]
-                        rates.append(float(np.mean([slot[i][0] for i in sub])))
-                        preds = [p for i in sub for p in slot[i][1]]
-                        aps.append(coco_map(preds, gt_by_id, sub, ann_meta)[0])
-                    cur[arm] = {"rate": rates, "mAP": aps}
-                for arm in ("prep", "sandwich"):
-                    draws.append(bd_rate(cur["anchor"]["rate"], cur["anchor"]["mAP"],
-                                         cur[arm]["rate"], cur[arm]["mAP"]))
-                if (d + 1) % 25 == 0:
-                    print(f"[probe] bootstrap {d + 1}/{args.bootstrap} draws ({codec_name})",
-                          flush=True)
-            ok = [d for d in draws if np.isfinite(d)]
-            if ok:
-                entry["ci"] = {"lo": float(np.percentile(ok, 2.5)),
-                               "hi": float(np.percentile(ok, 97.5)),
-                               "n_draws": len(ok)}
+            records = {arm: {qp: per_image[arm][(codec_name, qp)] for qp in qps}
+                       for arm in arms}
+            entry["ci"] = paired_detection_bootstrap(
+                records, qps, gt_by_id, image_ids, ann_meta,
+                n_draws=args.bootstrap, seed=args.seed)
+            for arm, ci in entry["ci"].items():
+                print(f"[probe] {codec_name} {arm}: {ci['n_draws']} valid / "
+                      f"{ci['n_requested']} bootstrap draws; "
+                      f"{ci['n_invalid']} invalid", flush=True)
         results["stages"]["B"][codec_name] = entry
 
     # persist the per-image records: mAP/BD/CI can then be recomputed offline,
@@ -393,8 +349,9 @@ def main() -> None:
                          "does not isolates resolution transfer from task transfer.")
     ap.add_argument("--qps", default="30,35,40,45,50")
     ap.add_argument("--stage", choices=["a", "both"], default="both")
-    ap.add_argument("--stage-a-threshold", type=float, default=0.85,
-                    help="abort if pre(x) mAP / anchor mAP falls below this")
+    ap.add_argument("--stage-a-threshold", type=float, default=None,
+                    help="optional diagnostic early stop if pre(x) / anchor mAP "
+                         "falls below this; disabled by default, not an RD test")
     ap.add_argument("--bootstrap", type=int, default=200)
     ap.add_argument("--min-anchor-boxes", type=int, default=1,
                     help="abort if the anchor yields fewer detections: a broken "

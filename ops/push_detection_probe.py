@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -91,7 +93,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", required=True)
     ap.add_argument("--account", default=os.environ.get("KAGGLE_ACCOUNT", "hieusunday0412"))
-    ap.add_argument("--datasets", default="rohanmallick/kinetics-train-5per,awsaf49/coco-2017-dataset",
+    ap.add_argument("--datasets", default="awsaf49/coco-2017-dataset",
                     help="comma list; the COCO dataset provides val2017 + annotations")
     ap.add_argument("--ckpt-dataset", default="hieusunday0412/u8-bigpost-s1-ckpt",
                     help="private dataset holding the frozen checkpoint (owner-scoped!)")
@@ -106,20 +108,26 @@ def main() -> None:
                     help="which probe to run; anything other than the checkpoint "
                          "probe uses the simple invocation (no --stage/--records)")
     ap.add_argument("--extra-args", default="")
-    ap.add_argument("--slug", default="u9-probe-detection")
+    ap.add_argument("--slug", default="u10-probe-detection")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4")
+    ap.add_argument("--dry-run", action="store_true", help="Generate and syntax-check only; no network or Kaggle")
+    ap.add_argument("--output-dir", type=Path, default=None)
     a = ap.parse_args()
 
-    src = BASH.replace("__COMMIT__", a.commit)
-    is_model_probe = a.script.endswith("probe_detection.py")
+    src = BASH.replace("__COMMIT__", shlex.quote(a.commit))
+    is_model_probe = Path(a.script).name == "probe_detection.py"
     src = src.replace("__INVOKE__", MODEL_CALL if is_model_probe else SIMPLE_CALL)
-    src = src.replace("__SCRIPT__", a.script).replace("__EXTRA_ARGS__", a.extra_args)
+    src = src.replace("__SCRIPT__", shlex.quote(a.script)).replace("__EXTRA_ARGS__", a.extra_args)
     src = src.replace("__NEEDS_CKPT__", "1" if is_model_probe else "0")
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
-    src = src.replace("__STAGE_A_SIZES__", a.stage_a_sizes)
-    src = src.replace("__QPS__", a.qps)
+    src = src.replace("__STAGE_A_SIZES__", shlex.quote(a.stage_a_sizes))
+    src = src.replace("__QPS__", shlex.quote(a.qps))
     src = src.replace("__BOOTSTRAP__", str(a.bootstrap))
+
+    if re.search(r"__[A-Z][A-Z0-9_]*__", src):
+        raise ValueError("Unresolved notebook template placeholder")
+    subprocess.run(["bash", "-n"], input="".join(src.splitlines(keepends=True)[1:]), text=True, check=True)
 
     nb = {"cells": [{"cell_type": "code", "execution_count": None, "metadata": {},
                      "outputs": [], "source": src.splitlines(keepends=True)}],
@@ -128,7 +136,7 @@ def main() -> None:
                        "language_info": {"name": "python"}},
           "nbformat": 4, "nbformat_minor": 5}
 
-    push_dir = REPO / "ops" / "_push" / a.slug
+    push_dir = a.output_dir or REPO / "ops" / "_push" / a.slug
     push_dir.mkdir(parents=True, exist_ok=True)
     (push_dir / "notebook.ipynb").write_text(json.dumps(nb))
     meta = {"id": f"{a.account}/{a.slug}", "title": a.slug,
@@ -136,9 +144,13 @@ def main() -> None:
             "kernel_type": "notebook", "is_private": True, "enable_gpu": True,
             "enable_internet": True,
             "dataset_sources": [d for d in a.datasets.split(",") if d]
-                               + ([a.ckpt_dataset] if a.ckpt_dataset else []),
+                               + ([a.ckpt_dataset] if is_model_probe and a.ckpt_dataset else []),
             "kernel_sources": [], "competition_sources": [], "model_sources": []}
     (push_dir / "kernel-metadata.json").write_text(json.dumps(meta))
+
+    if a.dry_run:
+        print(f"[dry-run] validated bash; wrote notebook and metadata to {push_dir}")
+        return
 
     cmd = ["kaggle", "kernels", "push", "-p", str(push_dir)]
     if a.accelerator:
