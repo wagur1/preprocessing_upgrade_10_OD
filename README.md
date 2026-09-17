@@ -54,3 +54,4 @@ python ops/push_detection_probe.py --commit <sha> --account <acct> \
 - Box của torchvision là **xyxy**, COCO cần **xywh** — luôn đi qua `_coco_box`.
 - Mọi split trong index phải **khác rỗng**: val rỗng sẽ âm thầm tắt model selection và early stopping.
 - Run dài trên Kaggle: ghi diagnostics ra **file** trong output dir (cell bị cap 12h mất sạch stdout).
+https://vsllm.com
