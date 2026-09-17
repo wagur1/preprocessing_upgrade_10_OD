@@ -21,13 +21,13 @@ set -euo pipefail
 export PYTHONUNBUFFERED=1
 
 cd /kaggle/working
-REPO=/kaggle/working/pre_processing_upgrade_9
+REPO=/kaggle/working/preprocessing_upgrade_10_OD
 
 if [ -d "$REPO/.git" ]; then
   git -C "$REPO" fetch --all -q
   git -C "$REPO" checkout -q __COMMIT__
 else
-  git clone -q https://github.com/wagur1/pre_processing_upgrade_9.git "$REPO"
+  git clone -q https://github.com/wagur1/preprocessing_upgrade_10_OD.git "$REPO"
   git -C "$REPO" checkout -q __COMMIT__
 fi
 cd "$REPO"
@@ -61,10 +61,10 @@ fi
 
 # ---- checkpoint from the TRAIN kernel's attached output ----
 # The train kernel's output = its whole /kaggle/working, so its checkpoint
-# lives at /kaggle/input/<train-slug>/pre_processing_upgrade_9/outputs/<run>/checkpoints/preprocessor.pth
+# lives at /kaggle/input/<train-slug>/preprocessing_upgrade_10_OD/outputs/<run>/checkpoints/preprocessor.pth
 #
 # Selection order matters. An earlier version excluded every path containing
-# `pre_processing_upgrade_9/` to dodge a STALE checkpoint from the cloned repo —
+# `preprocessing_upgrade_10_OD/` to dodge a STALE checkpoint from the cloned repo —
 # but the train kernel's output lives under exactly that directory name (its
 # /kaggle/working contains the clone), so v9-driven evals died with
 # "no preprocessor.pth in /kaggle/input" while v8-driven ones passed. Key on the

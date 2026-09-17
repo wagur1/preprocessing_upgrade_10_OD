@@ -155,7 +155,7 @@ PROBE_BASH = r"""%%bash
 set -euo pipefail
 export PYTHONUNBUFFERED=1
 cd /kaggle/working
-git clone -q https://github.com/wagur1/pre_processing_upgrade_9.git repo 2>/dev/null || (cd repo && git pull -q)
+git clone -q https://github.com/wagur1/preprocessing_upgrade_10_OD.git repo 2>/dev/null || (cd repo && git pull -q)
 cd repo
 git checkout -q __COMMIT__
 pip install -q opencv-python-headless pyyaml tqdm scipy matplotlib pandas 2>/dev/null | tail -1 || true
