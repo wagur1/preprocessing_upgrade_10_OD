@@ -58,8 +58,12 @@ CKPT=$(find /kaggle/input -maxdepth 8 -name 'preprocessor.pth' | head -1 || true
 echo "[detprobe] val=$VAL"
 echo "[detprobe] ann=$ANN"
 echo "[detprobe] ckpt=$CKPT"
-if [ -z "$VAL" ] || [ -z "$ANN" ] || [ -z "$CKPT" ]; then
-  echo "[detprobe] ERROR: missing an input (val2017 / annotations / checkpoint)" >&2
+# A parameter-free probe (background suppression) needs no checkpoint — demanding
+# one made the guard abort the whole run after the COCO mount, which is how the
+# first R0 attempt and its v10 twin both died at startup.
+NEEDS_CKPT=__NEEDS_CKPT__
+if [ -z "$VAL" ] || [ -z "$ANN" ] || { [ "$NEEDS_CKPT" = "1" ] && [ -z "$CKPT" ]; }; then
+  echo "[detprobe] ERROR: missing an input (val=${VAL:-none} ann=${ANN:-none} ckpt=${CKPT:-none} needs_ckpt=$NEEDS_CKPT)" >&2
   exit 1
 fi
 
@@ -110,6 +114,7 @@ def main() -> None:
     is_model_probe = a.script.endswith("probe_detection.py")
     src = src.replace("__INVOKE__", MODEL_CALL if is_model_probe else SIMPLE_CALL)
     src = src.replace("__SCRIPT__", a.script).replace("__EXTRA_ARGS__", a.extra_args)
+    src = src.replace("__NEEDS_CKPT__", "1" if is_model_probe else "0")
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
     src = src.replace("__STAGE_A_SIZES__", a.stage_a_sizes)
