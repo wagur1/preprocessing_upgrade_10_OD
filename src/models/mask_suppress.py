@@ -32,11 +32,17 @@ def protect_mask(boxes, scores, labels, size: int, score_thresh: float = 0.5,
     ``dilate`` is a fraction of each box's own size, so small objects get a
     proportionally small margin. Boxes below ``score_thresh`` are NOT protected:
     a detection the detector is unsure about should not buy bit budget.
+
+    The mask is allocated on the BOXES' device — the detector returns CUDA
+    tensors at eval time while the image may be on either device, and a CPU mask
+    against a CUDA frame is a RuntimeError that a CPU-only local test cannot see
+    (it cost one Kaggle cycle to learn that here).
     """
-    m = torch.zeros(1, 1, size, size)
-    scores = torch.as_tensor(scores).reshape(-1)
-    keep = scores >= score_thresh
-    for b in torch.as_tensor(boxes).reshape(-1, 4)[keep]:
+    boxes_t = torch.as_tensor(boxes)
+    scores_t = torch.as_tensor(scores).reshape(-1)
+    m = torch.zeros(1, 1, size, size, device=boxes_t.device)
+    keep = scores_t >= score_thresh
+    for b in boxes_t.reshape(-1, 4)[keep]:
         x1, y1, x2, y2 = [float(v) for v in b]
         w, h = x2 - x1, y2 - y1
         x1, x2 = x1 - dilate * w, x2 + dilate * w

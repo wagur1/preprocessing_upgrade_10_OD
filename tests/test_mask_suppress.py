@@ -57,6 +57,21 @@ def test_suppress_handles_clips_and_batches():
     assert torch.equal(out[:, :, :, :8, :8], x[:, :, :, :8, :8])
 
 
+def test_mask_follows_the_boxes_device():
+    """The detector's boxes decide the mask's device.
+
+    A CPU mask against a CUDA frame raises at `x * m` — a RuntimeError a CPU-only
+    local suite cannot reproduce, so the contract is pinned here instead: whatever
+    device the boxes live on, the mask (and therefore `suppress`) must follow.
+    """
+    boxes = torch.tensor([[1.0, 2.0, 8.0, 9.0]])
+    m = protect_mask(boxes, torch.tensor([0.9]), torch.tensor([1]), 32, 0.5, 0.1)
+    assert m.device == boxes.device
+    x = torch.rand(1, 3, 1, 32, 32, device=boxes.device)
+    out = suppress(x, m, 4.0)
+    assert out.device == x.device
+
+
 def test_mask_from_detections_matches_manual_call():
     det = {"boxes": torch.tensor([[5.0, 5.0, 25.0, 25.0]]),
            "scores": torch.tensor([0.8]), "labels": torch.tensor([3])}
