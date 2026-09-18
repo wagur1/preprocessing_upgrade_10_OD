@@ -98,3 +98,64 @@ def test_pusher_dry_run(tmp_path, monkeypatch, model):
     if model:
         expected += ["hieusunday0412/u8-bigpost-s1-ckpt"]
     assert meta["dataset_sources"] == expected
+
+
+def _load_pusher():
+    spec = importlib.util.spec_from_file_location("push_bg_helpers", ROOT / "ops/push_detection_probe.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _cell_argv(source):
+    """The argv bash would hand the probe, with continuations already folded."""
+    folded = source.replace(chr(92) + "\n", " ")
+    line = folded.split("python ops/", 1)[1].split("\n", 1)[0]
+    import shlex
+    return shlex.split("python ops/" + line)
+
+
+def test_push_rejects_an_extra_args_newline_escape():
+    """The exact u10-gaussian-post-500 failure: `\n` becomes the argument `n`.
+
+    `bash -n` passes and the probe dies on the GPU with "unrecognized arguments:
+    n n n n n n n n", so the launcher has to refuse it before pushing.
+    """
+    mod = _load_pusher()
+    for bad in (chr(92) + "n    --image-ids 1,2", "a\nb", "a\r\nb"):
+        with pytest.raises(ValueError, match="single line"):
+            mod.single_line(bad)
+    assert mod.single_line("--sigmas 4 --score 0.5") == "--sigmas 4 --score 0.5"
+
+
+def test_push_ids_file_becomes_one_image_ids_argument(tmp_path):
+    ids = [724, 885, 2149]
+    (tmp_path / "ids.json").write_text(json.dumps(ids))
+    mod = _load_pusher()
+    assert mod.quoted_ids(tmp_path / "ids.json") == "--image-ids 724,885,2149"
+    for payload, match in ((json.dumps([]), "nonempty"), (json.dumps([1, 1]), "unique"),
+                           (json.dumps([1, "2"]), "integers"), (json.dumps({"a": 1}), "nonempty")):
+        path = tmp_path / "bad.json"
+        path.write_text(payload)
+        with pytest.raises(ValueError, match=match):
+            mod.quoted_ids(path)
+
+
+def test_pusher_emits_parsable_argv(tmp_path, monkeypatch):
+    """A dry-run cell must reach the probe with every flag and no stray token."""
+    ids = list(range(1000, 1300))
+    (tmp_path / "ids.json").write_text(json.dumps(ids))
+    monkeypatch.setattr(sys, "argv", ["push", "--commit", "abc123",
+        "--script", "ops/probe_gaussian_post.py", "--dry-run",
+        "--output-dir", str(tmp_path), "--ids-file", str(tmp_path / "ids.json"),
+        "--out-name", "probe_gaussian_post",
+        "--extra-args", "--prep-sigma 4 --post-sigma 1"])
+    monkeypatch.setattr(_load_pusher().subprocess, "run", lambda *a, **k: None)
+    _load_pusher().main()
+    source = "".join(json.loads((tmp_path / "notebook.ipynb").read_text())["cells"][0]["source"])
+    argv = _cell_argv(source)
+    assert argv[1] == "ops/probe_gaussian_post.py"
+    assert "n" not in argv
+    assert argv[argv.index("--image-ids") + 1] == ",".join(str(i) for i in ids)
+    assert argv[argv.index("--out") + 1] == "outputs/probe_gaussian_post"
+    assert argv[argv.index("--prep-sigma") + 1] == "4"
