@@ -31,8 +31,29 @@ là các module *thêm/sửa* cấu trúc — thứ mAP không thưởng. Nên h
 | Core detection (data, analyzer, probe, pusher) | ✅ đã port, test xanh |
 | R0 — mask từ detector + suppression nền | ✅ implement + test (`tests/test_mask_suppress.py`) |
 | Chạy R0 trên Kaggle (COCO val, 500 ảnh) | ✅ **thắng** — xem bảng dưới |
-| POST Gaussian toàn khung sau R0 (0 bit) | ⏳ `u10-gaussian-post-500` |
+| POST Gaussian toàn khung sau R0 (0 bit) | ❌ **bị loại** — gap FAIL cả hai codec |
+| Cổng theo QP cho POST (T=40 h264 / 45 h265) | ⏳ đăng ký trước, `u10-gaussian-post-gate500` |
 | R1 — gate học được | ⏸ mở được (R0 đã dương), nhưng chưa có lý do để ưu tiên |
+
+### Kết quả probe POST (2026-09-18, `htran123456/u10-gaussian-post-500`)
+
+Ba arm dùng chung round trip: `prep` (R0) và `post` (decode của prep + Gaussian toàn khung σ=1,
+không mã hoá lại) có **đúng** cùng bpp — kiểm chứng 5000/5000 ô của `pairing.jsonl` trùng
+SHA-256 decode và bpp. Vì vậy chênh lệch mAP theo QP là của riêng bộ lọc.
+
+| codec | arm | BD vs anchor | gap | BD post vs prep |
+|---|---|---:|---|---:|
+| h264 | prep (R0) | −15,689 | PASS | — |
+| h264 | post | −20,524 | **FAIL** (−0,0632) | −4,311 % |
+| h265 | prep (R0) | −11,249 | PASS | — |
+| h265 | post | −6,571 | **FAIL** (−0,0651) | **+5,923 %** |
+
+POST toàn khung **bị loại**: nó thắng ở QP cao nhưng mất 4,0 pp mAP ở QP30 (h264) và trên h265
+còn tệ hơn R0. Delta mAP theo QP cho thấy nó là bộ khử nhiễu, chỉ có lợi khi nhiễu nén chiếm ưu
+thế — nên biến thể **cổng theo QP** (bật POST khi QP ≥ T) mới là thứ đáng thử. Giả thuyết đó đã
+đăng ký trước tại [`docs/RUN_DESIGN_gaussian_post_gate.md`](docs/RUN_DESIGN_gaussian_post_gate.md)
+với T cố định 40/45, và đang được xác nhận trên 500 ảnh mới hoàn toàn
+(`configs/r0_gate500_ids.json`).
 
 ### Kết quả R0 (2026-09-18, `htran123456/u10-gaussian-correct-500`)
 
