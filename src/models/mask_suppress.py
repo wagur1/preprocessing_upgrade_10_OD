@@ -104,3 +104,33 @@ def mask_from_detections(det_out: dict, size: int, score_thresh: float = 0.5,
     """Build the mask from one entry of the detector's output."""
     return protect_mask(det_out["boxes"], det_out["scores"], det_out["labels"],
                         size, score_thresh, dilate)
+
+
+def fill_outside(x: torch.Tensor, mask: torch.Tensor, value: float) -> torch.Tensor:
+    """Replace unprotected pixels with a constant; protected pixels are bit-exact.
+
+    Same mask conventions as `suppress`. The mask is expected binary (1 =
+    protect); intermediate values interpolate between the frame and `value`.
+    `value` must lie in [0, 1] to stay inside the range a standard codec expects
+    from a [0, 1] float frame — the aggressive end of the published family
+    (Li & Rhee's "NROI MASK", ROI-Packing's discard).
+    """
+    if x.ndim != 5 or not x.is_floating_point() or any(d == 0 for d in x.shape):
+        raise ValueError("x must be nonempty floating [B,C,T,H,W]")
+    if not math.isfinite(value) or not 0 <= value <= 1:
+        raise ValueError("value must be finite and in [0,1]")
+    if not torch.isfinite(x).all():
+        raise ValueError("x must be finite")
+    m = torch.as_tensor(mask, device=x.device)
+    if not torch.isfinite(m).all() or ((m < 0) | (m > 1)).any():
+        raise ValueError("mask must be finite and in [0,1]")
+    if m.ndim == 2:
+        m = m[None, None, None]
+    elif m.ndim == 4:
+        m = m.unsqueeze(2)
+    if m.ndim != 5 or m.shape[1] != 1 or m.shape[-2:] != x.shape[-2:]:
+        raise ValueError("mask must be [H,W], [B,1,H,W], or [B,1,T,H,W]")
+    if m.shape[0] not in (1, x.shape[0]) or m.shape[2] not in (1, x.shape[2]):
+        raise ValueError("mask B/T axes must be singleton or match x")
+    m = m.to(dtype=x.dtype)
+    return torch.where(m == 1, x, x * m + value * (1 - m))
