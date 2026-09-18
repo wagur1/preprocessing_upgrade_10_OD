@@ -30,20 +30,54 @@ là các module *thêm/sửa* cấu trúc — thứ mAP không thưởng. Nên h
 |---|---|
 | Core detection (data, analyzer, probe, pusher) | ✅ đã port, test xanh |
 | R0 — mask từ detector + suppression nền | ✅ implement + test (`tests/test_mask_suppress.py`) |
-| Chạy R0 trên Kaggle (COCO val, 500 ảnh) | ⏳ đang chạy |
-| R1 — gate học được | ⏸ chỉ mở nếu R0 dương |
+| Chạy R0 trên Kaggle (COCO val, 500 ảnh) | ✅ **thắng** — xem bảng dưới |
+| POST Gaussian toàn khung sau R0 (0 bit) | ⏳ `u10-gaussian-post-500` |
+| R1 — gate học được | ⏸ mở được (R0 đã dương), nhưng chưa có lý do để ưu tiên |
+
+### Kết quả R0 (2026-09-18, `htran123456/u10-gaussian-correct-500`)
+
+BD-rate trên **trục mAP** so với anchor `codec(x)`; âm = ít bit hơn ở cùng mAP.
+n=500 ảnh COCO val2017 (320px), QP 30–50, analyzer Faster R-CNN R50-FPN COCO_V1 đóng băng,
+`cover` (tỉ lệ pixel được bảo vệ) = 0,588.
+
+| codec | blur4 | blur8 | blur16 |
+|---|---:|---:|---:|
+| h264 | −15,69 | −16,69 | −16,89 |
+| h265 | −11,25 | −11,44 | −12,10 |
+
+Luật gap PASS ở mọi QP trên cả hai codec (mức xấu nhất −0,024 mAP tại QP30, ngưỡng −0,05).
+Đây là **điểm**; CI bootstrap theo ảnh đang tính offline ở
+`vcm_deepseek/r0_gaussian500_analysis/` — `status` giữ `running` cho tới khi đủ 1000 draw.
+Artifact: `outputs/probe_bgsuppress/` của run corrected (`probe_bgsuppress.json` +
+`per_image_records.npz`); hai run độc lập cho cùng kết luận (run cũ −14,83/−16,57/−16,12 trên h264,
+anchor của hai run trùng khớp tuyệt đối).
+
+Đọc đúng: mAP **thấp hơn** ở hai mức bitrate cao (h264 QP30: 0,2806 so với anchor 0,3036) và
+**cao hơn** ở QP50 — thắng về rate, không phải về accuracy.
 
 ## Chạy
 
 ```bash
-pytest -q                                   # 134 test
+pytest -q                                   # 239 test
 
-# R0 trên Kaggle (eval-only, không train, ~20 phút)
+# R0 trên Kaggle (eval-only, không train)
 python ops/push_detection_probe.py --commit <sha> --account <acct> \
     --script ops/probe_background_suppression.py \
-    --extra-args "--sigmas 4,8,16 --score 0.5 --dilate 0.15" \
-    --ckpt-dataset "" --n-images 500 --size 320 --slug u9-probe-bgsuppress
+    --ids-file configs/r0_500_ids.json --out-name probe_bgsuppress \
+    --extra-args "--sigmas 4,8,16 --score 0.5 --dilate 0.15 --device cuda" \
+    --n-images 500 --size 320 --slug u10-probe-bgsuppress
+
+# POST Gaussian toàn khung sau R0 (3 arm: anchor / prep / post)
+python ops/push_detection_probe.py --commit <sha> --account <acct> \
+    --script ops/probe_gaussian_post.py \
+    --out-name probe_gaussian_post --ids-file configs/r0_500_ids.json \
+    --extra-args "--prep-sigma 4 --post-sigma 1 --score 0.5 --dilate 0.15 --device cuda" \
+    --slug u10-gaussian-post-500
 ```
+
+`--extra-args` phải nằm trên **một dòng**: một `\n` literal bị bash đọc thành đối số `n` và
+probe chết với `unrecognized arguments: n n n n` (đã xảy ra một lần; xem commit `fcc2f19`).
+Danh sách ID dài đi qua `--ids-file`, không nhồi vào chuỗi extra-args.
 
 ## Ràng buộc (áp cho mọi thí nghiệm ở đây)
 
