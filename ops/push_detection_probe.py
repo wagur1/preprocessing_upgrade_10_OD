@@ -72,7 +72,7 @@ fi
 __INVOKE__
 
 echo "[detprobe] done"
-ls -la outputs/probe_detection || true
+ls -la outputs/__OUT_NAME__ || true
 """
 
 
@@ -81,12 +81,43 @@ MODEL_CALL = """python ops/probe_detection.py \\
     --config configs/sandwich_ar.yaml \\
     --n-images __N_IMAGES__ --size __SIZE__ --stage-a-sizes __STAGE_A_SIZES__ \\
     --qps __QPS__ --bootstrap __BOOTSTRAP__ --stage both --records \\
-    --out outputs/probe_detection"""
+    --out outputs/__OUT_NAME__"""
 
 SIMPLE_CALL = """python __SCRIPT__ \\
     --images "$VAL" --ann "$ANN" \\
     --n-images __N_IMAGES__ --size __SIZE__ --qps __QPS__ __EXTRA_ARGS__ \\
-    --out outputs/probe_bgsuppress"""
+    --out outputs/__OUT_NAME__"""
+
+
+def quoted_ids(path):
+    """Local JSON list of ints -> one `--image-ids a,b,c` argument.
+
+    A 500-ID list is ~3.9 kB, which is fine on one line; the earlier failure
+    came from a hand-built multi-line invocation, not from the length.
+    """
+    ids = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(ids, list) or not ids:
+        raise ValueError("--ids-file must hold a nonempty JSON list of image IDs")
+    if any(type(i) is not int or i < 0 for i in ids):
+        raise ValueError("--ids-file IDs must be nonnegative integers")
+    if len(ids) != len(set(ids)):
+        raise ValueError("--ids-file IDs must be unique")
+    if len(ids) > 1000:
+        raise ValueError("--ids-file holds more IDs than this probe supports")
+    return "--image-ids " + ",".join(str(i) for i in ids)
+
+
+def single_line(extra_args):
+    """Reject anything that would fold into stray `n` tokens inside the cell.
+
+    `__EXTRA_ARGS__` is substituted into one continued shell line. A literal
+    `\\n` (double-escaped newline) survives as backslash+n, bash then reads it
+    as the argument `n`, and the probe dies with "unrecognized arguments: n n n".
+    """
+    if "\n" in extra_args or "\r" in extra_args or "\\n" in extra_args:
+        raise ValueError("--extra-args must be a single line with no \\n escapes; "
+                         "pass long ID lists with --ids-file instead")
+    return extra_args
 
 
 def main() -> None:
@@ -108,6 +139,12 @@ def main() -> None:
                     help="which probe to run; anything other than the checkpoint "
                          "probe uses the simple invocation (no --stage/--records)")
     ap.add_argument("--extra-args", default="")
+    ap.add_argument("--ids-file", default=None,
+                    help="Local JSON list of COCO image IDs, appended as one "
+                         "--image-ids argument (the 500-ID R0 set lives in configs/)")
+    ap.add_argument("--out-name", default=None,
+                    help="output directory name under outputs/ (default: probe_detection "
+                         "for the checkpoint probe, probe_bgsuppress otherwise)")
     ap.add_argument("--slug", default="u10-probe-detection")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4")
     ap.add_argument("--dry-run", action="store_true", help="Generate and syntax-check only; no network or Kaggle")
@@ -116,8 +153,13 @@ def main() -> None:
 
     src = BASH.replace("__COMMIT__", shlex.quote(a.commit))
     is_model_probe = Path(a.script).name == "probe_detection.py"
+    out_name = a.out_name or ("probe_detection" if is_model_probe else "probe_bgsuppress")
+    extra_args = single_line(a.extra_args)
+    if a.ids_file:
+        extra_args = " ".join(x for x in (extra_args, quoted_ids(a.ids_file)) if x)
     src = src.replace("__INVOKE__", MODEL_CALL if is_model_probe else SIMPLE_CALL)
-    src = src.replace("__SCRIPT__", shlex.quote(a.script)).replace("__EXTRA_ARGS__", a.extra_args)
+    src = src.replace("__SCRIPT__", shlex.quote(a.script)).replace("__EXTRA_ARGS__", extra_args)
+    src = src.replace("__OUT_NAME__", shlex.quote(out_name))
     src = src.replace("__NEEDS_CKPT__", "1" if is_model_probe else "0")
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
