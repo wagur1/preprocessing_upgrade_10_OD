@@ -54,9 +54,10 @@ def test_sample_ids_filters_and_is_deterministic(tmp_path):
 
 
 def test_to_coco_json_normalizes_boxes_and_restricts_categories(tmp_path):
+    import zlib
     mid2coco = {"/m/01g317": 1, "/m/0k4j": 3, "/m/0bt9lr": 41}  # person, car, dog... 41=bottle
-    meta = {int("aaaaaaaaaaaaaaaa", 16): (1000, 500, "aaaaaaaaaaaaaaaa.jpg"),
-            int("cccccccccccccccc", 16): (200, 200, "cccccccccccccccc.jpg")}
+    meta = {zlib.crc32(b"aaaaaaaaaaaaaaaa"): (1000, 500, "aaaaaaaaaaaaaaaa.jpg"),
+            zlib.crc32(b"cccccccccccccccc"): (200, 200, "cccccccccccccccc.jpg")}
     rows = [
         # normalized box fully inside
         ("aaaaaaaaaaaaaaaa", "/m/01g317", 0.0, 0.0, 1.0, 1.0, 0),

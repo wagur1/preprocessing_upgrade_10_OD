@@ -15,8 +15,9 @@ annotation CSVs only — no photos. Inside a kernel with internet this script:
      is a no-op and the sampled set IS the evaluated set;
   5. invokes ops/probe_background_suppression.py unchanged as a subprocess.
 
-Image IDs are int(hex(ImageID)): records stay integer-keyed and the hex makes
-them stable across runs. GT boxes are the normalized CSV coordinates times the
+Image IDs are zlib.crc32(ImageID) — a 32-bit int pycocotools can hold (the raw
+hex is 64 bits and overflows its C long); the hex stays in file_name, and a
+collision raises instead of silently merging two photos. GT boxes are the normalized CSV coordinates times the
 pixel size of the downloaded photo. Pixel sizes are read from the raw grid —
 no EXIF transpose — to match the probe's own loader, so GT scaling and the
 detector input always share one orientation. The GT file lists only the
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import zlib
 import json
 import random
 import subprocess
@@ -119,7 +121,10 @@ def download_images(ids, out_dir: Path, tries: int = 3):
             if last is not None:
                 raise RuntimeError(f"download failed for {iid}: {last}")
         with Image.open(dest) as source:
-            meta[int(iid, 16)] = (source.size[0], source.size[1], f"{iid}.jpg")
+            key = zlib.crc32(iid.encode("ascii"))
+        if key in meta:
+            raise ValueError(f"crc32 id collision between two sampled images ({iid})")
+        meta[key] = (source.size[0], source.size[1], f"{iid}.jpg")
         print(f"[oid] downloaded {iid} ({len(meta)}/{len(ids)})", flush=True)
     return meta
 
@@ -130,7 +135,7 @@ def to_coco_json(bbox_csv: Path, mid_to_coco: dict, meta: dict):
 
     bbox = pd.read_csv(bbox_csv)
     bbox = bbox[(bbox["IsGroupOf"] == 0) & (bbox["LabelName"].isin(mid_to_coco))].copy()
-    bbox["image_key"] = bbox["ImageID"].map(lambda s: int(s, 16))
+    bbox["image_key"] = bbox["ImageID"].map(lambda s: zlib.crc32(s.encode("ascii")))
     bbox = bbox[bbox["image_key"].isin(meta)]
 
     used = sorted({mid_to_coco[mid] for mid in bbox["LabelName"]})
