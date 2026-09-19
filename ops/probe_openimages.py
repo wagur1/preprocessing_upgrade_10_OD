@@ -142,8 +142,7 @@ def to_coco_json(bbox_csv: Path, mid_to_coco: dict, meta: dict):
     names = {i + 1: name for i, name in enumerate(COCO80)}
     images, annotations = [], []
     ann_id = 0
-    for iid in sorted(meta):
-        w, h, file_name = meta[iid]
+    for iid, (w, h, file_name) in sorted(meta.items(), key=lambda kv: kv[1][2]):
         images.append({"id": iid, "file_name": file_name, "width": w, "height": h})
         rows = bbox[bbox["image_key"] == iid]
         for _, row in rows.iterrows():
