@@ -63,9 +63,17 @@ echo "[detprobe] ckpt=$CKPT"
 # A parameter-free probe (background suppression) needs no checkpoint — demanding
 # one made the guard abort the whole run after the COCO mount, which is how the
 # first R0 attempt and its v10 twin both died at startup.
+# Self-discovering scripts (--no-coco-inputs, e.g. probe_openimages.py) locate
+# their own inputs; the guard then only checks the checkpoint.
 NEEDS_CKPT=__NEEDS_CKPT__
-if [ -z "$VAL" ] || [ -z "$ANN" ] || { [ "$NEEDS_CKPT" = "1" ] && [ -z "$CKPT" ]; }; then
-  echo "[detprobe] ERROR: missing an input (val=${VAL:-none} ann=${ANN:-none} ckpt=${CKPT:-none} needs_ckpt=$NEEDS_CKPT)" >&2
+NEEDS_COCO=__NEEDS_COCO__
+if [ "$NEEDS_COCO" = "1" ] && { [ -z "$VAL" ] || [ -z "$ANN" ]; }; then
+  echo "[detprobe] ERROR: missing COCO inputs (val=${VAL:-none} ann=${ANN:-none}; " \
+       "pass --no-coco-inputs for self-discovering scripts)" >&2
+  exit 1
+fi
+if [ "$NEEDS_CKPT" = "1" ] && [ -z "$CKPT" ]; then
+  echo "[detprobe] ERROR: missing an input (ckp=${CKPT:-none} needs_ckpt=$NEEDS_CKPT)" >&2
   exit 1
 fi
 
@@ -84,7 +92,7 @@ MODEL_CALL = """python ops/probe_detection.py \\
     --out outputs/__OUT_NAME__"""
 
 SIMPLE_CALL = """python __SCRIPT__ \\
-    --images "$VAL" --ann "$ANN" \\
+    __INPUT_ARGS__ \\
     --n-images __N_IMAGES__ --size __SIZE__ --qps __QPS__ __EXTRA_ARGS__ \\
     --out outputs/__OUT_NAME__"""
 
@@ -146,6 +154,9 @@ def main() -> None:
                     help="output directory name under outputs/ (default: probe_detection "
                          "for the checkpoint probe, probe_bgsuppress otherwise)")
     ap.add_argument("--slug", default="u10-probe-detection")
+    ap.add_argument("--no-coco-inputs", action="store_true",
+                    help="the script locates its own inputs (e.g. probe_openimages.py): "
+                         "the guard skips val/ann and the invocation omits --images/--ann")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4")
     ap.add_argument("--dry-run", action="store_true", help="Generate and syntax-check only; no network or Kaggle")
     ap.add_argument("--output-dir", type=Path, default=None)
@@ -161,6 +172,9 @@ def main() -> None:
     src = src.replace("__SCRIPT__", shlex.quote(a.script)).replace("__EXTRA_ARGS__", extra_args)
     src = src.replace("__OUT_NAME__", shlex.quote(out_name))
     src = src.replace("__NEEDS_CKPT__", "1" if is_model_probe else "0")
+    src = src.replace("__NEEDS_COCO__", "0" if a.no_coco_inputs else "1")
+    input_args = "" if a.no_coco_inputs else '--images "$VAL" --ann "$ANN" \\'
+    src = src.replace("__INPUT_ARGS__", input_args)
     src = src.replace("__N_IMAGES__", str(a.n_images))
     src = src.replace("__SIZE__", str(a.size))
     src = src.replace("__STAGE_A_SIZES__", shlex.quote(a.stage_a_sizes))
